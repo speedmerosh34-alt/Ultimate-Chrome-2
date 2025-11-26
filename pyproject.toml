@@ -12,6 +12,7 @@ replit = "^3.2.4"
 waitress = "^3.0.2"
 flask = "^3.1.2"
 pillow = "^10.0.0"
+nest-asyncio = "^1.5.8"
 
 [tool.poetry.dev-dependencies]
 
