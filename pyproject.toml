@@ -3,11 +3,14 @@ name = "ultimate-chrome"
 version = "3.0.0"
 description = ""
 authors = ["Parker Wahle <regulad@regulad.xyz>"]
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.10"
 selenium = "^4.1.0"
 replit = "^3.2.4"
+waitress = "^3.0.2"
+flask = "^3.1.2"
 
 [tool.poetry.dev-dependencies]
 
