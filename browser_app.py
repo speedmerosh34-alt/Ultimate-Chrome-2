@@ -1,14 +1,16 @@
 from flask import Flask, jsonify, request
-from selenium.webdriver import Chrome, ChromeOptions
-import threading
-import time
+from pyppeteer import launch
+import asyncio
+import base64
 import sys
+import io
+from PIL import Image
 
 app = Flask(__name__)
 
-driver = None
-init_lock = threading.Lock()
-init_complete = threading.Event()
+browser = None
+page = None
+loop = None
 last_screenshot = None
 last_screenshot_time = 0
 
@@ -143,7 +145,7 @@ HTML_CONTENT = '''<!DOCTYPE html>
                 const data = await response.json();
                 const img = document.createElement('img');
                 img.id = 'screenshot';
-                img.src = 'data:image/png;base64,' + data.screenshot;
+                img.src = 'data:image/jpeg;base64,' + data.screenshot;
                 img.onclick = handleClick;
                 
                 content.innerHTML = '';
@@ -174,7 +176,7 @@ HTML_CONTENT = '''<!DOCTYPE html>
                 });
                 if (!response.ok) throw new Error('Navigation failed');
                 
-                await new Promise(r => setTimeout(r, 1200));
+                await new Promise(r => setTimeout(r, 800));
                 await refreshScreenshot();
             } catch (e) {
                 statusDot.classList.add('error');
@@ -194,7 +196,7 @@ HTML_CONTENT = '''<!DOCTYPE html>
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ x, y })
                 });
-                await new Promise(r => setTimeout(r, 600));
+                await new Promise(r => setTimeout(r, 400));
                 await refreshScreenshot();
             } catch (e) {
                 console.error('Click failed:', e);
@@ -208,48 +210,54 @@ HTML_CONTENT = '''<!DOCTYPE html>
             }
         });
 
-        setInterval(refreshScreenshot, 2000);
-        setTimeout(refreshScreenshot, 500);
+        setInterval(refreshScreenshot, 1000);
+        setTimeout(refreshScreenshot, 300);
     </script>
 </body>
 </html>'''
 
-def init_browser(wait=False):
-    global driver
+def get_event_loop():
+    global loop
     try:
-        with init_lock:
-            if driver is not None:
-                return True
-            
-            print("Initializing Chrome browser...", file=sys.stderr, flush=True)
-            chrome_options = ChromeOptions()
-            chrome_options.add_argument('--headless=new')
-            chrome_options.add_argument('--no-sandbox')
-            chrome_options.add_argument('--disable-dev-shm-usage')
-            chrome_options.add_argument('--disable-gpu')
-            chrome_options.add_argument('--window-size=1920,1080')
-            chrome_options.add_argument('--disable-extensions')
-            chrome_options.add_argument('--disable-plugins')
-            chrome_options.add_argument('--disable-software-rasterizer')
-            chrome_options.add_argument('--single-process')
-            chrome_options.add_argument('--no-first-run')
-            chrome_options.add_argument('--no-default-browser-check')
-            
-            driver = Chrome(options=chrome_options)
-            driver.set_page_load_timeout(15)
-            driver.get('https://google.com')
-            init_complete.set()
-            print("Chrome browser ready!", file=sys.stderr, flush=True)
+        if loop is None or loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return asyncio.get_event_loop()
+    except:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
+
+async def init_browser_async():
+    global browser, page
+    try:
+        if browser is not None and page is not None:
             return True
+        print("Initializing browser with pyppeteer...", file=sys.stderr, flush=True)
+        browser = await launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process'], autoClose=False)
+        page = await browser.newPage()
+        await page.setViewport({'width': 1280, 'height': 720})
+        await page.goto('https://google.com', {'waitUntil': 'load', 'timeout': 10000})
+        print("Browser ready!", file=sys.stderr, flush=True)
+        return True
     except Exception as e:
         print(f"Init error: {e}", file=sys.stderr, flush=True)
+        browser = None
+        page = None
         return False
 
-def wait_for_browser(timeout=30):
-    if not init_complete.wait(timeout=timeout):
-        if not driver:
-            init_browser()
-    return driver is not None
+def init_browser():
+    loop = get_event_loop()
+    return loop.run_until_complete(init_browser_async())
+
+def compress_screenshot(screenshot_data, quality=75):
+    try:
+        img = Image.open(io.BytesIO(screenshot_data))
+        buffer = io.BytesIO()
+        img.save(buffer, format='JPEG', quality=quality, optimize=True)
+        return base64.b64encode(buffer.getvalue()).decode('utf-8')
+    except:
+        return base64.b64encode(screenshot_data).decode('utf-8')
 
 @app.route('/')
 def index():
@@ -257,91 +265,84 @@ def index():
 
 @app.route('/api/screenshot')
 def screenshot():
-    global driver, last_screenshot, last_screenshot_time
+    global page, last_screenshot, last_screenshot_time
     try:
-        if last_screenshot and (time.time() - last_screenshot_time) < 1:
+        import time
+        now = time.time()
+        if last_screenshot and (now - last_screenshot_time) < 0.5:
             return jsonify(last_screenshot)
         
-        if not driver:
+        if not page:
             if not init_browser():
                 return jsonify({'error': 'Browser init failed'}), 500
         
-        try:
-            screenshot_b64 = driver.get_screenshot_as_base64()
-            url = driver.current_url
-            title = driver.title
-            
-            result = {'screenshot': screenshot_b64, 'url': url, 'title': title}
-            last_screenshot = result
-            last_screenshot_time = time.time()
-            
-            return jsonify(result)
-        except Exception as e:
-            driver = None
-            init_complete.clear()
-            if init_browser():
-                screenshot_b64 = driver.get_screenshot_as_base64()
-                result = {'screenshot': screenshot_b64, 'url': driver.current_url, 'title': driver.title}
-                return jsonify(result)
-            return jsonify({'error': str(e)}), 500
+        loop = get_event_loop()
+        screenshot_data = loop.run_until_complete(page.screenshot({'type': 'png'}))
+        screenshot_b64 = compress_screenshot(screenshot_data, quality=70)
+        url = page.url
+        
+        result = {'screenshot': screenshot_b64, 'url': url, 'title': 'Browser'}
+        last_screenshot = result
+        last_screenshot_time = now
+        return jsonify(result)
     except Exception as e:
+        print(f"Screenshot error: {e}", file=sys.stderr, flush=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/navigate', methods=['POST'])
 def navigate():
-    global driver
+    global page
     try:
-        if not driver and not init_browser():
-            return jsonify({'error': 'Browser not ready'}), 500
+        if not page:
+            if not init_browser():
+                return jsonify({'error': 'Browser not ready'}), 500
         
         url = request.json.get('url', 'https://google.com')
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
         
-        try:
-            driver.get(url)
-            return jsonify({'status': 'ok', 'url': driver.current_url})
-        except Exception as e:
-            driver = None
-            return jsonify({'error': str(e)}), 500
+        loop = get_event_loop()
+        loop.run_until_complete(page.goto(url, {'waitUntil': 'load', 'timeout': 15000}))
+        return jsonify({'status': 'ok', 'url': page.url})
     except Exception as e:
+        print(f"Navigate error: {e}", file=sys.stderr, flush=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/click', methods=['POST'])
 def click():
-    global driver
+    global page
     try:
-        if not driver:
+        if not page:
             return jsonify({'error': 'Browser not ready'}), 500
         
         x = request.json.get('x', 0)
         y = request.json.get('y', 0)
         
-        driver.execute_script(f"""
-            try {{
-                var element = document.elementFromPoint({x}, {y});
-                if (element) element.click();
-            }} catch(e) {{}}
-        """)
+        loop = get_event_loop()
+        loop.run_until_complete(page.click({'x': x, 'y': y}))
         return jsonify({'status': 'ok'})
     except Exception as e:
+        print(f"Click error: {e}", file=sys.stderr, flush=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/type', methods=['POST'])
 def type_text():
-    global driver
+    global page
     try:
-        if not driver:
+        if not page:
             return jsonify({'error': 'Browser not ready'}), 500
         
         text = request.json.get('text', '')
-        driver.switch_to.active_element.send_keys(text)
+        loop = get_event_loop()
+        loop.run_until_complete(page.type(text))
         return jsonify({'status': 'ok'})
     except Exception as e:
+        print(f"Type error: {e}", file=sys.stderr, flush=True)
         return jsonify({'error': str(e)}), 500
 
 @app.after_request
 def add_headers(response):
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = '*'
@@ -349,5 +350,5 @@ def add_headers(response):
     return response
 
 if __name__ == '__main__':
-    threading.Thread(target=init_browser, daemon=True).start()
+    init_browser()
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True, use_reloader=False)
