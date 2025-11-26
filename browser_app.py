@@ -5,6 +5,9 @@ import base64
 import sys
 import io
 from PIL import Image
+import nest_asyncio
+
+nest_asyncio.apply()
 
 app = Flask(__name__)
 
@@ -219,14 +222,14 @@ HTML_CONTENT = '''<!DOCTYPE html>
 def get_event_loop():
     global loop
     try:
-        if loop is None or loop.is_closed():
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-        return asyncio.get_event_loop()
-    except:
+    except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        return loop
+    return loop
 
 async def init_browser_async():
     global browser, page
