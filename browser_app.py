@@ -1,3 +1,6 @@
+import nest_asyncio
+nest_asyncio.apply()
+
 from flask import Flask, jsonify, request
 from pyppeteer import launch
 import asyncio
@@ -5,15 +8,14 @@ import base64
 import sys
 import io
 from PIL import Image
-import nest_asyncio
-
-nest_asyncio.apply()
+import threading
 
 app = Flask(__name__)
 
 browser = None
 page = None
 loop = None
+lock = threading.Lock()
 last_screenshot = None
 last_screenshot_time = 0
 
@@ -221,15 +223,16 @@ HTML_CONTENT = '''<!DOCTYPE html>
 
 def get_event_loop():
     global loop
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
+    with lock:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop
+        return loop
 
 async def init_browser_async():
     global browser, page
@@ -275,14 +278,15 @@ def screenshot():
         if last_screenshot and (now - last_screenshot_time) < 0.5:
             return jsonify(last_screenshot)
         
-        if not page:
-            if not init_browser():
-                return jsonify({'error': 'Browser init failed'}), 500
-        
-        loop = get_event_loop()
-        screenshot_data = loop.run_until_complete(page.screenshot({'type': 'png'}))
-        screenshot_b64 = compress_screenshot(screenshot_data, quality=70)
-        url = page.url
+        with lock:
+            if not page:
+                if not init_browser():
+                    return jsonify({'error': 'Browser init failed'}), 500
+            
+            loop = get_event_loop()
+            screenshot_data = loop.run_until_complete(page.screenshot({'type': 'png'}))
+            screenshot_b64 = compress_screenshot(screenshot_data, quality=70)
+            url = page.url
         
         result = {'screenshot': screenshot_b64, 'url': url, 'title': 'Browser'}
         last_screenshot = result
@@ -296,17 +300,18 @@ def screenshot():
 def navigate():
     global page
     try:
-        if not page:
-            if not init_browser():
-                return jsonify({'error': 'Browser not ready'}), 500
-        
-        url = request.json.get('url', 'https://google.com')
-        if not url.startswith(('http://', 'https://')):
-            url = 'https://' + url
-        
-        loop = get_event_loop()
-        loop.run_until_complete(page.goto(url, {'waitUntil': 'load', 'timeout': 15000}))
-        return jsonify({'status': 'ok', 'url': page.url})
+        with lock:
+            if not page:
+                if not init_browser():
+                    return jsonify({'error': 'Browser not ready'}), 500
+            
+            url = request.json.get('url', 'https://google.com')
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
+            
+            loop = get_event_loop()
+            loop.run_until_complete(page.goto(url, {'waitUntil': 'load', 'timeout': 15000}))
+            return jsonify({'status': 'ok', 'url': page.url})
     except Exception as e:
         print(f"Navigate error: {e}", file=sys.stderr, flush=True)
         return jsonify({'error': str(e)}), 500
@@ -315,14 +320,15 @@ def navigate():
 def click():
     global page
     try:
-        if not page:
-            return jsonify({'error': 'Browser not ready'}), 500
-        
-        x = request.json.get('x', 0)
-        y = request.json.get('y', 0)
-        
-        loop = get_event_loop()
-        loop.run_until_complete(page.click({'x': x, 'y': y}))
+        with lock:
+            if not page:
+                return jsonify({'error': 'Browser not ready'}), 500
+            
+            x = request.json.get('x', 0)
+            y = request.json.get('y', 0)
+            
+            loop = get_event_loop()
+            loop.run_until_complete(page.click({'x': x, 'y': y}))
         return jsonify({'status': 'ok'})
     except Exception as e:
         print(f"Click error: {e}", file=sys.stderr, flush=True)
@@ -332,12 +338,13 @@ def click():
 def type_text():
     global page
     try:
-        if not page:
-            return jsonify({'error': 'Browser not ready'}), 500
-        
-        text = request.json.get('text', '')
-        loop = get_event_loop()
-        loop.run_until_complete(page.type(text))
+        with lock:
+            if not page:
+                return jsonify({'error': 'Browser not ready'}), 500
+            
+            text = request.json.get('text', '')
+            loop = get_event_loop()
+            loop.run_until_complete(page.type(text))
         return jsonify({'status': 'ok'})
     except Exception as e:
         print(f"Type error: {e}", file=sys.stderr, flush=True)
